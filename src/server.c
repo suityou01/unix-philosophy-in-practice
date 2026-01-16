@@ -8,31 +8,44 @@
 #include <arpa/inet.h>
 #include "protocol.h"
 
+void send_error_response(int client_fd, uint8_t error_code) {
+    response_message_t response;
+    
+    init_request_header(&response.header, CMD_GET_TIME, sizeof(response) - sizeof(message_header_t));
+    response.status = error_code;
+    response.timestamp = 0;
+    
+    write(client_fd, &response, sizeof(response));
+}
+
 void handle_get_time(int client_fd) {
-    response_t response;
+    response_message_t response;
     
     // Get current Unix timestamp
     time_t current_time = time(NULL);
     
-    // Build response
+    // Build response header
+    init_request_header(&response.header, CMD_GET_TIME, sizeof(response) - sizeof(message_header_t));
+    
+    // Build response body
     response.status = RESP_OK;
-    response.timestamp = htonl((uint32_t)current_time);  // Convert to network byte order
+    response.timestamp = htonl((uint32_t)current_time);
     
     // Send response
     ssize_t sent = write(client_fd, &response, sizeof(response));
     if (sent < 0) {
         perror("write() failed");
     } else {
-        printf("Sent timestamp: %u\n", (uint32_t)current_time);
+        printf("✓ Sent timestamp: %u\n", (uint32_t)current_time);
     }
 }
 
 void handle_client(int client_fd) {
-    request_t request;
+    message_header_t header;
     ssize_t bytes_read;
     
-    // Read request from client
-    bytes_read = read(client_fd, &request, sizeof(request));
+    // Read message header
+    bytes_read = read(client_fd, &header, sizeof(header));
     
     if (bytes_read < 0) {
         perror("read() failed");
@@ -46,26 +59,68 @@ void handle_client(int client_fd) {
         return;
     }
     
-    if (bytes_read < (ssize_t)sizeof(request)) {
-        printf("Incomplete request received\n");
+    if (bytes_read < (ssize_t)sizeof(header)) {
+        printf("✗ Incomplete header received (%zd bytes)\n", bytes_read);
         close(client_fd);
         return;
     }
     
-    // Handle command
-    printf("Received command: 0x%02x\n", request.command);
+    // Validate header
+    int validation = validate_header(&header);
+    if (validation != RESP_OK) {
+        if (validation == RESP_BAD_MAGIC) {
+            printf("✗ Bad magic number: 0x%08x (expected 0x%08x)\n", 
+                   ntohl(header.magic), PROTOCOL_MAGIC);
+        } else if (validation == RESP_BAD_VERSION) {
+            printf("✗ Bad version: %d (expected %d)\n", 
+                   header.version, PROTOCOL_VERSION);
+        }
+        send_error_response(client_fd, validation);
+        close(client_fd);
+        return;
+    }
     
-    switch (request.command) {
+    // Get message details
+    uint16_t msg_length = ntohs(header.length);
+    uint8_t command = header.command;
+    
+    printf("Received valid message:\n");
+    printf("  Magic: 0x%08x\n", ntohl(header.magic));
+    printf("  Version: %d\n", header.version);
+    printf("  Length: %d bytes\n", msg_length);
+    printf("  Command: 0x%02x\n", command);
+    
+    // Calculate payload size
+    uint16_t payload_size = msg_length - sizeof(message_header_t);
+    
+    // Read payload if present (for future commands)
+    if (payload_size > 0) {
+        char payload[BUFFER_SIZE];
+        if (payload_size < BUFFER_SIZE) {
+            bytes_read = read(client_fd, payload, payload_size);
+            if (bytes_read < payload_size) {
+                printf("✗ Incomplete payload\n");
+                send_error_response(client_fd, RESP_ERROR);
+                close(client_fd);
+                return;
+            }
+        } else {
+            printf("✗ Payload too large: %d bytes\n", payload_size);
+            send_error_response(client_fd, RESP_ERROR);
+            close(client_fd);
+            return;
+        }
+    }
+    
+    // Handle command
+    switch (command) {
         case CMD_GET_TIME:
             handle_get_time(client_fd);
             break;
         
         default:
-            printf("Unknown command: 0x%02x\n", request.command);
-            response_t error_response;
-            error_response.status = RESP_ERROR;
-            error_response.timestamp = 0;
-            write(client_fd, &error_response, sizeof(error_response));
+            printf("✗ Unknown command: 0x%02x\n", command);
+            send_error_response(client_fd, RESP_ERROR);
             break;
     }
     
@@ -80,8 +135,10 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
     
-    printf("Bell Labs Style Time Server v0.2\n");
+    printf("Bell Labs Style Time Server v0.3\n");
     printf("=================================\n");
+    printf("Protocol: TIME v%d (Magic: 0x%08x)\n", PROTOCOL_VERSION, PROTOCOL_MAGIC);
+    printf("\n");
     printf("Supported commands:\n");
     printf("  0x01 - GET_TIME: Query system time\n");
     printf("\n");
@@ -127,11 +184,13 @@ int main(int argc, char *argv[]) {
             continue;
         }
         
+        printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
         printf("Client connected from %s:%d\n", 
                inet_ntoa(client_addr.sin_addr), 
                ntohs(client_addr.sin_port));
         
         handle_client(client_fd);
+        printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
     }
     
     close(server_fd);

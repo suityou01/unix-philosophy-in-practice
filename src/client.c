@@ -19,8 +19,8 @@ void print_time(uint32_t timestamp) {
 int get_time(const char *server_ip) {
     int sock_fd;
     struct sockaddr_in server_addr;
-    request_t request;
-    response_t response;
+    request_message_t request;
+    response_message_t response;
     
     // Create socket
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -44,16 +44,19 @@ int get_time(const char *server_ip) {
     printf("Connected to %s:%d\n", server_ip, TIMESERVER_PORT);
     
     // Build GET_TIME request
-    request.command = CMD_GET_TIME;
+    init_request_header(&request.header, CMD_GET_TIME, 0);
     
-    // Send request
-    if (write(sock_fd, &request, sizeof(request)) < 0) {
+    printf("Sending request:\n");
+    printf("  Magic: 0x%08x\n", PROTOCOL_MAGIC);
+    printf("  Version: %d\n", PROTOCOL_VERSION);
+    printf("  Command: GET_TIME (0x%02x)\n", CMD_GET_TIME);
+    
+    // Send request (just the header for GET_TIME)
+    if (write(sock_fd, &request.header, sizeof(request.header)) < 0) {
         perror("write() failed");
         close(sock_fd);
         return -1;
     }
-    
-    printf("Sent GET_TIME request\n");
     
     // Read response
     ssize_t bytes = read(sock_fd, &response, sizeof(response));
@@ -64,21 +67,34 @@ int get_time(const char *server_ip) {
     }
     
     if (bytes < (ssize_t)sizeof(response)) {
-        printf("Incomplete response received\n");
+        printf("Incomplete response received (%zd bytes)\n", bytes);
+        close(sock_fd);
+        return -1;
+    }
+    
+    // Validate response header
+    int validation = validate_header(&response.header);
+    if (validation != RESP_OK) {
+        if (validation == RESP_BAD_MAGIC) {
+            printf("✗ Server sent bad magic number\n");
+        } else if (validation == RESP_BAD_VERSION) {
+            printf("✗ Server protocol version mismatch\n");
+        }
         close(sock_fd);
         return -1;
     }
     
     // Parse response
     if (response.status == RESP_OK) {
-        uint32_t timestamp = ntohl(response.timestamp);  // Convert from network byte order
+        uint32_t timestamp = ntohl(response.timestamp);
+        printf("\n✓ Success!\n");
         print_time(timestamp);
     } else {
-        printf("Server returned error: 0x%02x\n", response.status);
+        printf("✗ Server returned error: 0x%02x\n", response.status);
     }
     
     close(sock_fd);
-    return 0;
+    return (response.status == RESP_OK) ? 0 : -1;
 }
 
 int main(int argc, char *argv[]) {
@@ -88,7 +104,7 @@ int main(int argc, char *argv[]) {
         server_ip = argv[1];
     }
     
-    printf("Bell Labs Time Client v0.2\n");
+    printf("Bell Labs Time Client v0.3\n");
     printf("==========================\n\n");
     
     return get_time(server_ip);
