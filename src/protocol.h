@@ -15,11 +15,15 @@
 #define RESP_ERROR 0x01
 #define RESP_UNAUTHORIZED 0x02
 
-// Message structure (will evolve)
+// Request message structure
 typedef struct {
     uint8_t command;
+} __attribute__((packed)) request_t;
+
+// Response message structure
+typedef struct {
+    uint8_t status;
     uint32_t timestamp;
-    char auth_token[32];
-} timeserver_message_t;
+} __attribute__((packed)) response_t;
 
 #endif // PROTOCOL_H

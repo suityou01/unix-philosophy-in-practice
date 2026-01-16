@@ -2,23 +2,71 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "protocol.h"
 
+void handle_get_time(int client_fd) {
+    response_t response;
+    
+    // Get current Unix timestamp
+    time_t current_time = time(NULL);
+    
+    // Build response
+    response.status = RESP_OK;
+    response.timestamp = htonl((uint32_t)current_time);  // Convert to network byte order
+    
+    // Send response
+    ssize_t sent = write(client_fd, &response, sizeof(response));
+    if (sent < 0) {
+        perror("write() failed");
+    } else {
+        printf("Sent timestamp: %u\n", (uint32_t)current_time);
+    }
+}
+
 void handle_client(int client_fd) {
-    char buffer[BUFFER_SIZE];
+    request_t request;
     ssize_t bytes_read;
     
-    // For now, just echo back what we receive
-    bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
-    if (bytes_read > 0) {
-        buffer[bytes_read] = '\0';
-        printf("Received: %s\n", buffer);
+    // Read request from client
+    bytes_read = read(client_fd, &request, sizeof(request));
+    
+    if (bytes_read < 0) {
+        perror("read() failed");
+        close(client_fd);
+        return;
+    }
+    
+    if (bytes_read == 0) {
+        printf("Client disconnected\n");
+        close(client_fd);
+        return;
+    }
+    
+    if (bytes_read < (ssize_t)sizeof(request)) {
+        printf("Incomplete request received\n");
+        close(client_fd);
+        return;
+    }
+    
+    // Handle command
+    printf("Received command: 0x%02x\n", request.command);
+    
+    switch (request.command) {
+        case CMD_GET_TIME:
+            handle_get_time(client_fd);
+            break;
         
-        // Echo back
-        write(client_fd, buffer, bytes_read);
+        default:
+            printf("Unknown command: 0x%02x\n", request.command);
+            response_t error_response;
+            error_response.status = RESP_ERROR;
+            error_response.timestamp = 0;
+            write(client_fd, &error_response, sizeof(error_response));
+            break;
     }
     
     close(client_fd);
@@ -29,8 +77,14 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
     
-    printf("Bell Labs Style Time Server v0.1\n");
-    printf("=================================\n\n");
+    (void)argc;
+    (void)argv;
+    
+    printf("Bell Labs Style Time Server v0.2\n");
+    printf("=================================\n");
+    printf("Supported commands:\n");
+    printf("  0x01 - GET_TIME: Query system time\n");
+    printf("\n");
     
     // Create socket
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
