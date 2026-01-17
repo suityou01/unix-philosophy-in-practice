@@ -31,13 +31,10 @@ typedef struct {
     uint8_t command;     // Command or response type
 } __attribute__((packed)) message_header_t;
 
-// Request message structure
+// SET_TIME request payload
 typedef struct {
-    message_header_t header;
-    uint8_t payload[0];  // Flexible array member for future use
-} __attribute__((packed)) request_message_t;
-
-// GET_TIME has no payload
+    uint32_t new_timestamp;
+} __attribute__((packed)) set_time_payload_t;
 
 // Response message structure
 typedef struct {

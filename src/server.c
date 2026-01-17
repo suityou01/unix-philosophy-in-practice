@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -11,32 +12,58 @@
 void send_error_response(int client_fd, uint8_t error_code) {
     response_message_t response;
     
-    init_request_header(&response.header, CMD_GET_TIME, sizeof(response) - sizeof(message_header_t));
+    init_request_header(&response.header, 0, sizeof(response) - sizeof(message_header_t));
     response.status = error_code;
     response.timestamp = 0;
     
     write(client_fd, &response, sizeof(response));
 }
 
-void handle_get_time(int client_fd) {
+void send_response(int client_fd, uint8_t status, uint32_t timestamp) {
     response_message_t response;
     
-    // Get current Unix timestamp
+    init_request_header(&response.header, 0, sizeof(response) - sizeof(message_header_t));
+    response.status = status;
+    response.timestamp = htonl(timestamp);
+    
+    write(client_fd, &response, sizeof(response));
+}
+
+void handle_get_time(int client_fd) {
     time_t current_time = time(NULL);
     
-    // Build response header
-    init_request_header(&response.header, CMD_GET_TIME, sizeof(response) - sizeof(message_header_t));
+    printf("  → Sending current time: %u\n", (uint32_t)current_time);
+    send_response(client_fd, RESP_OK, (uint32_t)current_time);
+}
+
+void handle_set_time(int client_fd, set_time_payload_t *payload) {
+    uint32_t new_timestamp = ntohl(payload->new_timestamp);
+    struct timeval tv;
     
-    // Build response body
-    response.status = RESP_OK;
-    response.timestamp = htonl((uint32_t)current_time);
+    printf("  ⚠️  VULNERABILITY: SET_TIME with NO AUTHENTICATION!\n");
+    printf("  → Requested time: %u\n", new_timestamp);
     
-    // Send response
-    ssize_t sent = write(client_fd, &response, sizeof(response));
-    if (sent < 0) {
-        perror("write() failed");
+    // Convert timestamp to human-readable
+    time_t t = (time_t)new_timestamp;
+    struct tm *tm_info = localtime(&t);
+    char time_str[26];
+    strftime(time_str, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+    printf("  → New time would be: %s\n", time_str);
+    
+    // Convert to timeval structure
+    tv.tv_sec = new_timestamp;
+    tv.tv_usec = 0;
+    
+    // Attempt to set system time
+    // NOTE: This requires root privileges or CAP_SYS_TIME capability
+    if (settimeofday(&tv, NULL) == 0) {
+        printf("  ✓ System time CHANGED to %u\n", new_timestamp);
+        printf("  ⚠️  THIS IS A SECURITY VULNERABILITY!\n");
+        send_response(client_fd, RESP_OK, new_timestamp);
     } else {
-        printf("✓ Sent timestamp: %u\n", (uint32_t)current_time);
+        perror("  ✗ settimeofday() failed");
+        printf("  ℹ  (Server needs root privileges or CAP_SYS_TIME)\n");
+        send_response(client_fd, RESP_ERROR, 0);
     }
 }
 
@@ -48,19 +75,19 @@ void handle_client(int client_fd) {
     bytes_read = read(client_fd, &header, sizeof(header));
     
     if (bytes_read < 0) {
-        perror("read() failed");
+        perror("  ✗ read() failed");
         close(client_fd);
         return;
     }
     
     if (bytes_read == 0) {
-        printf("Client disconnected\n");
+        printf("  Client disconnected\n");
         close(client_fd);
         return;
     }
     
     if (bytes_read < (ssize_t)sizeof(header)) {
-        printf("✗ Incomplete header received (%zd bytes)\n", bytes_read);
+        printf("  ✗ Incomplete header (%zd bytes)\n", bytes_read);
         close(client_fd);
         return;
     }
@@ -69,57 +96,58 @@ void handle_client(int client_fd) {
     int validation = validate_header(&header);
     if (validation != RESP_OK) {
         if (validation == RESP_BAD_MAGIC) {
-            printf("✗ Bad magic number: 0x%08x (expected 0x%08x)\n", 
-                   ntohl(header.magic), PROTOCOL_MAGIC);
+            printf("  ✗ Bad magic: 0x%08x\n", ntohl(header.magic));
         } else if (validation == RESP_BAD_VERSION) {
-            printf("✗ Bad version: %d (expected %d)\n", 
-                   header.version, PROTOCOL_VERSION);
+            printf("  ✗ Bad version: %d\n", header.version);
         }
         send_error_response(client_fd, validation);
         close(client_fd);
         return;
     }
     
-    // Get message details
     uint16_t msg_length = ntohs(header.length);
     uint8_t command = header.command;
-    
-    printf("Received valid message:\n");
-    printf("  Magic: 0x%08x\n", ntohl(header.magic));
-    printf("  Version: %d\n", header.version);
-    printf("  Length: %d bytes\n", msg_length);
-    printf("  Command: 0x%02x\n", command);
-    
-    // Calculate payload size
     uint16_t payload_size = msg_length - sizeof(message_header_t);
     
-    // Read payload if present (for future commands)
-    if (payload_size > 0) {
-        char payload[BUFFER_SIZE];
-        if (payload_size < BUFFER_SIZE) {
-            bytes_read = read(client_fd, payload, payload_size);
-            if (bytes_read < payload_size) {
-                printf("✗ Incomplete payload\n");
-                send_error_response(client_fd, RESP_ERROR);
-                close(client_fd);
-                return;
-            }
-        } else {
-            printf("✗ Payload too large: %d bytes\n", payload_size);
-            send_error_response(client_fd, RESP_ERROR);
-            close(client_fd);
-            return;
-        }
-    }
+    printf("  Message: cmd=0x%02x, length=%d, payload=%d\n", 
+           command, msg_length, payload_size);
     
     // Handle command
     switch (command) {
-        case CMD_GET_TIME:
+        case CMD_GET_TIME: {
+            if (payload_size != 0) {
+                printf("  ✗ GET_TIME should have no payload\n");
+                send_error_response(client_fd, RESP_ERROR);
+                break;
+            }
             handle_get_time(client_fd);
             break;
+        }
+        
+        case CMD_SET_TIME: {
+            if (payload_size != sizeof(set_time_payload_t)) {
+                printf("  ✗ SET_TIME payload size mismatch (expected %zu, got %d)\n",
+                       sizeof(set_time_payload_t), payload_size);
+                send_error_response(client_fd, RESP_ERROR);
+                break;
+            }
+            
+            // Read SET_TIME payload
+            set_time_payload_t payload;
+            bytes_read = read(client_fd, &payload, sizeof(payload));
+            
+            if (bytes_read < (ssize_t)sizeof(payload)) {
+                printf("  ✗ Incomplete SET_TIME payload\n");
+                send_error_response(client_fd, RESP_ERROR);
+                break;
+            }
+            
+            handle_set_time(client_fd, &payload);
+            break;
+        }
         
         default:
-            printf("✗ Unknown command: 0x%02x\n", command);
+            printf("  ✗ Unknown command: 0x%02x\n", command);
             send_error_response(client_fd, RESP_ERROR);
             break;
     }
@@ -135,12 +163,19 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
     
-    printf("Bell Labs Style Time Server v0.3\n");
-    printf("=================================\n");
+    printf("╔════════════════════════════════════════════════════════════╗\n");
+    printf("║  Bell Labs Time Server v0.4 - UNSAFE/VULNERABLE VERSION  ║\n");
+    printf("╚════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+    printf("⚠️  WARNING: THIS VERSION IS DELIBERATELY INSECURE!\n");
+    printf("⚠️  ANY CLIENT CAN CHANGE THE SYSTEM TIME!\n");
+    printf("⚠️  FOR EDUCATIONAL PURPOSES ONLY!\n");
+    printf("\n");
     printf("Protocol: TIME v%d (Magic: 0x%08x)\n", PROTOCOL_VERSION, PROTOCOL_MAGIC);
     printf("\n");
     printf("Supported commands:\n");
     printf("  0x01 - GET_TIME: Query system time\n");
+    printf("  0x02 - SET_TIME: Change system time (NO AUTH!)\n");
     printf("\n");
     
     // Create socket
@@ -174,6 +209,7 @@ int main(int argc, char *argv[]) {
     }
     
     printf("Server listening on port %d\n", TIMESERVER_PORT);
+    printf("NOTE: Run with 'sudo ./server' to allow SET_TIME to work\n");
     printf("Press Ctrl+C to stop\n\n");
     
     // Accept loop
@@ -184,15 +220,17 @@ int main(int argc, char *argv[]) {
             continue;
         }
         
-        printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-        printf("Client connected from %s:%d\n", 
+        printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        printf("Client: %s:%d\n", 
                inet_ntoa(client_addr.sin_addr), 
                ntohs(client_addr.sin_port));
         
         handle_client(client_fd);
-        printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+        
+        printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
     }
     
     close(server_fd);
     return 0;
 }
+
