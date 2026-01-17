@@ -632,6 +632,274 @@ exploit_timeserver('127.0.0.1', 1704067200)
 print("Server time changed to Jan 1, 2024!")
 ```
 
+## Analyzing Protocol Traffic with tcpdump
+
+### Basic Packet Capture
+
+**Capturing TIME protocol traffic:**
+```bash
+# Terminal 1: Start tcpdump (captures all traffic on port 9999)
+sudo tcpdump -i any port 9999 -XX -vv
+
+# Terminal 2: Start server
+sudo ./server
+
+# Terminal 3: Send commands
+./client get
+./client set 1704067200
+```
+
+**tcpdump flags explained:**
+- `-i any`: Listen on all interfaces (including loopback for localhost)
+- `port 9999`: Filter only traffic on our TIME protocol port
+- `-XX`: Show packet contents in hex AND ASCII (with ethernet headers)
+- `-vv`: Very verbose output (shows packet details)
+
+### Understanding tcpdump Output
+
+**GET_TIME Request Capture:**
+```
+18:30:45.123456 IP localhost.54321 > localhost.9999: Flags [P.], seq 1:9, ack 1, win 512, length 8
+	0x0000:  0000 0000 0000 0000 0000 0000 0800 4500  ..............E.
+	0x0010:  003c 1234 4000 4006 0000 7f00 0001 7f00  .<.4@.@.........
+	0x0020:  0001 d431 270f 0000 0001 0000 0001 5018  ...1'.........P.
+	0x0030:  0200 fe30 0000 5449 4d45 0100 0801       ...0..TIME....
+	                      ^^^^ ^^^^ ^^^^ ^^^^
+```
+
+**Breaking down the protocol bytes:**
+```
+Offset  Hex Values    ASCII  Meaning
+------  ----------    -----  -------
+0x0030  54 49 4D 45   TIME   Magic number (protocol ID)
+0x0034  01            .      Version 1
+0x0035  00 08         ..     Length: 8 bytes (header only)
+0x0037  01            .      Command: GET_TIME (0x01)
+```
+
+**GET_TIME Response Capture:**
+```
+18:30:45.123789 IP localhost.9999 > localhost.54321: Flags [P.], seq 1:14, ack 9, win 512, length 13
+	0x0000:  0000 0000 0000 0000 0000 0000 0800 4500  ..............E.
+	0x0010:  0041 1235 4000 4006 0000 7f00 0001 7f00  .A.5@.@.........
+	0x0020:  0001 270f d431 0000 0001 0000 0009 5018  ..'..1........P.
+	0x0030:  0200 fe35 0000 5449 4d45 0100 0d00 0067  ...5..TIME.....g
+	0x0040:  89ab cd                                  ...
+	                      ^^^^ ^^^^ ^^^^ ^^^^ ^^^^ ^^^^
+```
+
+**Breaking down the response:**
+```
+Offset  Hex Values       ASCII  Meaning
+------  -------------    -----  -------
+0x0030  54 49 4D 45      TIME   Magic number
+0x0034  01               .      Version 1
+0x0035  00 0D            ..     Length: 13 bytes (header + body)
+0x0037  00               .      Command/Type: 0x00
+0x0038  00               .      Status: RESP_OK (0x00)
+0x0039  67 89 AB CD      g...   Timestamp: 0x6789ABCD (in network byte order)
+                                 = 1,737,035,725 in decimal
+                                 = 2026-01-16 17:28:45 UTC
+```
+
+### SET_TIME Request Capture
+```
+18:31:00.456123 IP localhost.54322 > localhost.9999: Flags [P.], seq 1:13, ack 1, win 512, length 12
+	0x0030:  0200 fe35 0000 5449 4d45 0100 0c02 65a2  ...5..TIME....e.
+	0x0040:  b3c0                                     ..
+	                      ^^^^ ^^^^ ^^^^ ^^^^ ^^^^ ^^^^
+```
+
+**Breaking down SET_TIME request:**
+```
+Offset  Hex Values       ASCII  Meaning
+------  -------------    -----  -------
+0x0030  54 49 4D 45      TIME   Magic number
+0x0034  01               .      Version 1
+0x0035  00 0C            ..     Length: 12 bytes (header + payload)
+0x0037  02               .      Command: SET_TIME (0x02)
+0x0038  65 A2 B3 C0      e...   New timestamp: 0x65A2B3C0 (network order)
+                                 = 1,704,067,200 in decimal
+                                 = 2024-01-01 00:00:00 UTC
+```
+
+### Saving Captures for Analysis
+```bash
+# Save to file for later analysis
+sudo tcpdump -i any port 9999 -w timeprotocol.pcap
+
+# Run your client commands
+./client get
+./client set 1704067200
+
+# Stop tcpdump (Ctrl+C)
+
+# Analyze the saved capture
+tcpdump -r timeprotocol.pcap -XX
+
+# Or open in Wireshark for graphical analysis
+wireshark timeprotocol.pcap
+```
+
+### Filtering Specific Traffic
+```bash
+# Only capture client requests (data going TO port 9999)
+sudo tcpdump -i any dst port 9999 -XX
+
+# Only capture server responses (data coming FROM port 9999)
+sudo tcpdump -i any src port 9999 -XX
+
+# Capture first 10 packets only
+sudo tcpdump -i any port 9999 -c 10 -XX
+
+# Show timestamps in human-readable format
+sudo tcpdump -i any port 9999 -tttt -XX
+```
+
+### Verifying Network Byte Order
+
+One of the key learning moments is seeing **network byte order** (big-endian) in action:
+
+**Timestamp on client (little-endian x86):**
+```c
+uint32_t timestamp = 1704067200;
+// In memory: C0 B3 A2 65 (little-endian)
+```
+
+**After htonl() conversion:**
+```c
+uint32_t network_timestamp = htonl(timestamp);
+// In memory: 65 A2 B3 C0 (big-endian)
+```
+
+**On the wire (tcpdump shows):**
+```
+0x0038  65 A2 B3 C0
+        ^^^^^^^^^^^ Big-endian (network byte order)
+```
+
+**This proves the conversion worked!**
+
+### Hands-On Exercise: Decode by Hand
+
+1. **Capture a SET_TIME request:**
+```bash
+   sudo tcpdump -i any port 9999 -XX -c 1 > capture.txt
+   ./client set 1704067200
+```
+
+2. **Open capture.txt and find the protocol bytes:**
+```
+   Look for: 54 49 4D 45 (magic number "TIME")
+```
+
+3. **Decode each field manually:**
+   - What's the version?
+   - What's the total length?
+   - What command is this?
+   - What timestamp is being set?
+
+4. **Convert timestamp to date:**
+```bash
+   date -d @1704067200
+   # Should show: Mon Jan  1 00:00:00 GMT 2024
+```
+
+### Common tcpdump Pitfalls
+
+**Problem: "permission denied"**
+```bash
+# Solution: Run with sudo
+sudo tcpdump -i any port 9999 -XX
+```
+
+**Problem: "No suitable device found"**
+```bash
+# List available interfaces
+tcpdump -D
+
+# Use specific interface
+sudo tcpdump -i lo port 9999 -XX  # loopback for localhost
+sudo tcpdump -i eth0 port 9999 -XX  # ethernet
+```
+
+**Problem: Too much output, can't read it**
+```bash
+# Limit number of packets
+sudo tcpdump -i any port 9999 -XX -c 2
+
+# Or save to file and analyze slowly
+sudo tcpdump -i any port 9999 -w capture.pcap
+tcpdump -r capture.pcap -XX | less
+```
+
+**Problem: Can't see the protocol data in output**
+```bash
+# Make sure you're using -X or -XX
+sudo tcpdump -i any port 9999 -XX  # not just -X
+```
+
+### Wireshark Alternative
+
+For a graphical view of the protocol:
+```bash
+# Capture with tcpdump
+sudo tcpdump -i any port 9999 -w timeprotocol.pcap
+
+# Open in Wireshark
+wireshark timeprotocol.pcap
+```
+
+**In Wireshark:**
+1. You'll see TCP packets
+2. Right-click → Follow → TCP Stream
+3. See the entire conversation
+4. Click "Show data as: Hex Dump"
+5. Find the `54 49 4D 45` magic number
+6. Decode the protocol visually
+
+### Protocol Verification Checklist
+
+Using tcpdump, verify:
+
+- [ ] Magic number is `54 49 4D 45` ("TIME" in ASCII)
+- [ ] Version is `01`
+- [ ] GET_TIME length is `00 08` (8 bytes)
+- [ ] SET_TIME length is `00 0C` (12 bytes)
+- [ ] Commands are `01` (GET_TIME) and `02` (SET_TIME)
+- [ ] Timestamps are in network byte order (big-endian)
+- [ ] Response status is `00` (RESP_OK) on success
+- [ ] Both request and response have proper headers
+
+### Teaching Moment: Bytes on the Wire
+
+This is where the abstraction layers become visible:
+
+**In your C code:**
+```c
+typedef struct {
+    uint32_t magic;
+    uint8_t version;
+    uint16_t length;
+    uint8_t command;
+} __attribute__((packed)) message_header_t;
+```
+
+**On the wire (tcpdump):**
+```
+54 49 4D 45 01 00 08 01
+```
+
+**They're the SAME thing!** The struct is literally laid out in memory and sent as bytes.
+
+This demonstrates:
+- How serialization works
+- Why `__attribute__((packed))` matters
+- Why network byte order conversion is necessary
+- How protocols are just agreements about byte meanings
+
+**Perfect for understanding the "Unix philosophy in practice"!**
+
 ## Ethical Considerations
 
 ### Why We Built This
